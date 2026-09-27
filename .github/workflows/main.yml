@@ -1,0 +1,67 @@
+name: Tailscale RDP
+
+# Manual trigger only — this workflow opens remote desktop access to the runner,
+# so it should never fire automatically on push/PR.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "60"
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360   # hard ceiling regardless of duration_minutes input
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # --- Tailscale ---------------------------------------------------
+      # TS_AUTHKEY is a repo/org secret (Settings > Secrets and variables > Actions).
+      # Never commit the key itself — this is what makes the auth "non-public".
+      # Generate an *ephemeral, reusable, tagged* key in the Tailscale admin
+      # console (Settings > Keys) so it auto-expires and auto-removes the node.
+      - name: Install & connect Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          tags: tag:ci
+          hostname: gh-runner-${{ github.run_id }}
+          # Alternative: OAuth client credentials (needs a pair of secrets instead)
+          # oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          # oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+
+      - name: Show Tailscale IP
+        shell: bash
+        run: tailscale ip -4
+
+      # --- Enable RDP on the Windows runner ------------------------------
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+      # --- Set a runner-local RDP password (never printed, never committed) ---
+      - name: Set RDP password
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $securePwd = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $securePwd
+      - name: Print connection info
+        shell: bash
+        run: |
+          IP=$(tailscale ip -4)
+          echo "Connect with: mstsc /v:${IP}"
+          echo "User: runneradmin  (password is in the RDP_PASSWORD secret)"
+      # --- Keep the job (and Tailscale node) alive for the session -----
+      - name: Hold session open
+        shell: bash
+        run: |
+          MINUTES="${{ github.event.inputs.duration_minutes }}"
+          echo "Keeping runner alive for ${MINUTES} minutes..."
+          sleep $(( MINUTES * 60 ))
